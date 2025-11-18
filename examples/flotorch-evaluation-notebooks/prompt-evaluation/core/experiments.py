@@ -129,7 +129,6 @@ class ExperimentRunner:
                 api_key=api_key, base_url=base_url, vectorstore_id=knowledge_base
             )
 
-        # Calculate max_results from context_sizes to ensure we retrieve enough chunks
         max_results = None
         if context_sizes:
             max_results = max(context_sizes)
@@ -143,116 +142,154 @@ class ExperimentRunner:
         )
 
     async def _build_units(self) -> Tuple[List[ExperimentUnit], List[str]]:
-        """Build all experiment units. Returns (units, warnings)."""
+        """Builds one ExperimentUnit per (model x prompt pair x context size),
+        and stores context for ALL questions inside that unit.
+        """
         units = []
         warnings = []
+
+        # Build all model objects once
         model_objects = {
-            name: FlotorchLLM(name, self.api_key, self.base_url) for name in self.models
+            name: FlotorchLLM(name, self.api_key, self.base_url)
+            for name in self.models
         }
 
+        # MAIN LOOPS: model × prompt × context-size
         for model_name, model_obj in model_objects.items():
             for prompt in self.prompts:
-                for qa in self.ground_truth:
-                    question = qa.get("question", "")
-                    answer = qa.get("answer", "")
 
-                    sizes_to_test = self.context_sizes if self.context_sizes else [None]
-                    full_context = await self.context_provider.get_context(
-                        question, None
+                # Handle n-shot example subset
+                prompt_examples = prompt.get("examples", None)
+                selected_examples = None
+
+                if prompt_examples and isinstance(prompt_examples, list):
+                    if self.n is not None and self.n > 0:
+                        available_count = len(prompt_examples)
+                        if available_count >= self.n:
+                            selected_examples = random.sample(prompt_examples, self.n)
+                        else:
+                            selected_examples = prompt_examples
+                            warnings.append(
+                                f"Requested {self.n} examples but only {available_count} available; using all."
+                            )
+                    else:
+                        selected_examples = prompt_examples
+
+                # Iterate over all context sizes (or one None)
+                for size in (self.context_sizes or [None]):
+
+                    context_map = {}   # {question: [context_chunks]}
+                    skip_unit = False
+
+                    # Get context for ALL QUESTIONS
+                    for qa in self.ground_truth:
+                        question = qa.get("question", "")
+
+                        full_context = await self.context_provider.get_context(question, None)
+
+                        # If insufficient context, skip this whole unit
+                        if size is not None and len(full_context) < size:
+                            warnings.append(
+                                f"Skipped context size {size} for model '{model_name}', "
+                                f"prompt '{prompt.get('user_prompt','')[:30]}...' "
+                                f"because question '{question}' has only {len(full_context)} chunks."
+                            )
+                            skip_unit = True
+                            break
+
+                        # Choose chunks based on strategy
+                        if size is None:
+                            chosen = full_context
+                        elif self.context_provider.strategy == "top":
+                            chosen = full_context[:size]
+                        else:
+                            chosen = random.sample(full_context, size)
+
+                        context_map[question] = chosen
+
+                    if skip_unit:
+                        continue
+
+                    unit = ExperimentUnit(
+                        model_name=model_name,
+                        model_obj=model_obj,
+                        system_prompt=prompt.get("system_prompt", ""),
+                        user_prompt=prompt.get("user_prompt", ""),
+                        question=None,
+                        expected_answer=None,
+                        examples=selected_examples,
+                        context_size=size,
+                        context_chunks=context_map,
+                        assembly_rule=self.assembly_rule,
                     )
 
-                    for size in sizes_to_test:
-                        if size is not None and len(full_context) < size:
-                            warning = f"Skipped context size {size} for question '{question}': only {len(full_context)} context chunks available."
-                            warnings.append(warning)
-                            continue
-
-                        if size is None:
-                            context_chunks = full_context
-                        elif self.context_provider.strategy == "top":
-                            context_chunks = full_context[:size]
-                        else:
-                            context_chunks = random.sample(full_context, size)
-
-                        # Handle n-shot examples
-                        prompt_examples = prompt.get("examples", None)
-                        selected_examples = None
-
-                        if prompt_examples and isinstance(prompt_examples, list):
-                            if self.n is not None and self.n > 0:
-                                available_count = len(prompt_examples)
-                                if available_count >= self.n:
-                                    # Randomly sample n examples
-                                    selected_examples = random.sample(
-                                        prompt_examples, self.n
-                                    )
-                                else:
-                                    # Use all available examples and warn
-                                    selected_examples = prompt_examples
-                                    warning = f"Question '{question}': Requested {self.n} examples but only {available_count} available. Using all {available_count} examples."
-                                    warnings.append(warning)
-                            else:
-                                # If n is not specified, use all examples
-                                selected_examples = prompt_examples
-
-                        unit = ExperimentUnit(
-                            model_name=model_name,
-                            model_obj=model_obj,
-                            system_prompt=prompt.get("system_prompt", ""),
-                            user_prompt=prompt.get("user_prompt", ""),
-                            question=question,
-                            expected_answer=answer,
-                            examples=selected_examples,
-                            context_size=size,
-                            context_chunks=context_chunks,
-                            assembly_rule=self.assembly_rule,
-                        )
-                        units.append(unit)
+                    units.append(unit)
 
         return units, warnings
 
     async def _run_unit(
-        self, unit: ExperimentUnit, semaphore: asyncio.Semaphore
+        self,
+        unit: ExperimentUnit,
+        semaphore: asyncio.Semaphore
     ) -> Dict[str, Any]:
-        """Execute a single experiment unit."""
+        """Executes one experiment unit, running ALL questions and returning
+        the exact output format needed by the evaluator.
+        """
         async with semaphore:
-            # Examples are already filtered in _build_units
-            message_input = {
+            experiments = []
+
+            for qa in self.ground_truth:
+                question = qa.get("question", "")
+                expected = qa.get("answer", "")
+                context_chunks = unit.context_chunks.get(question, [])
+
+                message_input = {
+                    "system_prompt": unit.system_prompt,
+                    "user_prompt": unit.user_prompt,
+                    "question": question,
+                    "assembly_rule": unit.assembly_rule,
+                }
+
+                if unit.examples:
+                    message_input["examples"] = unit.examples
+
+                if context_chunks:
+                    message_input["context"] = context_chunks
+
+                messages = create_messages(**message_input)
+
+                try:
+                    response, headers = await unit.model_obj.ainvoke(
+                        messages=messages,
+                        return_headers=True,
+                        assembly_rule=unit.assembly_rule,
+                    )
+                    item = EvaluationItem(
+                        question=question,
+                        generated_answer=response.content,
+                        expected_answer=expected,
+                        context=context_chunks,
+                        metadata=headers,
+                    )
+
+                except Exception as e:
+                    item = EvaluationItem(
+                        question=question,
+                        generated_answer="",
+                        expected_answer=expected,
+                        context=context_chunks,
+                        metadata={"error": str(e)},
+                    )
+
+                experiments.append(item)
+
+            return {
+                "model": unit.model_name,
                 "system_prompt": unit.system_prompt,
                 "user_prompt": unit.user_prompt,
-                "question": unit.question,
-                "assembly_rule": unit.assembly_rule,
+                "context_size": unit.context_size,
+                "experiments": experiments,
             }
-            if unit.examples:
-                message_input["examples"] = unit.examples
-            if unit.context_chunks:
-                message_input["context"] = unit.context_chunks
-
-            messages = create_messages(**message_input)
-
-            try:
-                response, headers = await unit.model_obj.ainvoke(
-                    messages=messages,
-                    return_headers=True,
-                    assembly_rule=unit.assembly_rule,
-                )
-                result = EvaluationItem(
-                    question=unit.question,
-                    generated_answer=response.content,
-                    expected_answer=unit.expected_answer,
-                    context=unit.context_chunks,
-                    metadata=headers,
-                )
-            except Exception as e:
-                result = EvaluationItem(
-                    question=unit.question,
-                    generated_answer="",
-                    expected_answer=unit.expected_answer,
-                    context=unit.context_chunks,
-                    metadata={"error": str(e)},
-                )
-
-            return {"unit": unit, "result": result}
 
     async def run_async(self, concurrency: int = 10) -> Dict[str, Any]:
         """Run all experiments asynchronously.

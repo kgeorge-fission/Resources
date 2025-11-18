@@ -35,7 +35,7 @@ def get_weighted_scores(result: List[dict], weights: Dict[str, float]) -> List[d
     latencies = [
         item["evaluation_metrics"].get("average_latency_ms", 0) for item in result
     ]
-    costs = [item["evaluation_metrics"].get("total_cost", 0) for item in result]
+    costs = [item["evaluation_metrics"].get("average_cost", 0) for item in result]
     scores = [item["evaluation_metrics"].get("average_score", 0) for item in result]
 
     norm_latencies = normalize(latencies, invert=True)
@@ -46,7 +46,7 @@ def get_weighted_scores(result: List[dict], weights: Dict[str, float]) -> List[d
         weighted_score = (
             weights["average_score"] * norm_scores[i]
             + weights["average_latency_ms"] * norm_latencies[i]
-            + weights["total_cost"] * norm_costs[i]
+            + weights["average_cost"] * norm_costs[i]
         )
         item["evaluation_metrics"]["weighted_final_score"] = round(weighted_score, 3)
 
@@ -88,7 +88,7 @@ def display_prompt_results(
         print("\n" + "=" * 80)
         print("EXPERIMENT SUMMARY")
         print("=" * 80)
-        print(f"\nTotal LLM inference calls: {len(results)}")
+        print(f"\nTotal Number of experiments: {len(results)}")
         print(
             f"Models tested: {len(set(r.get('inference_model', 'N/A') for r in results))}"
         )
@@ -105,18 +105,6 @@ def display_prompt_results(
         )
         if context_sizes:
             print(f"Context sizes tested: {context_sizes}")
-
-        by_context = defaultdict(list)
-        for r in results:
-            ctx_size = r.get("context_size", "All")
-            by_context[ctx_size].append(r)
-
-        print("\nLLM calls by context size:")
-        for ctx_size in sorted(
-            by_context.keys(), key=lambda x: x if isinstance(x, int) else 999
-        ):
-            print(f"  • Context size {ctx_size}: {len(by_context[ctx_size])} calls")
-        print("=" * 80)
 
     if (
         show_comparison
@@ -263,6 +251,7 @@ def display_prompt_results(
                 round(m.get("average_latency_ms", 0), 2),
                 round(m.get("total_latency_ms", 0), 2),
                 m.get("total_tokens", 0),
+                round(m.get("average_cost", 0), 6),
                 round(m.get("total_cost", 0), 6),
                 m.get("weighted_final_score", "-"),
             ]
@@ -285,6 +274,7 @@ def display_prompt_results(
         "Avg Latency (ms)",
         "Total Latency (ms)",
         "Total Tokens",
+        "Avg Cost (USD)",
         "Total Cost (USD)",
         "Weighted Score",
     ]
@@ -301,8 +291,9 @@ def display_prompt_results(
         "average_latency_ms": 13,
         "total_latency_ms": 14,
         "total_tokens": 15,
-        "total_cost": 16,
-        "weighted_final_score": 17,
+        "average_cost": 16,
+        "total_cost": 17,
+        "weighted_final_score": 18,
     }
 
     metric_idx = metric_map[sort_by]
