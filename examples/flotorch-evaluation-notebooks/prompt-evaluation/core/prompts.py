@@ -138,7 +138,11 @@ def generate_prompts(
     if n <= 0:
         return []
 
-    validate_environment(llm_models=[llm], api_key=api_key, base_url=base_url)
+    try:
+        validate_environment(llm_models=[llm], api_key=api_key, base_url=base_url)
+    except Exception as e:
+        raise RuntimeError(f"Failed to validate environment: {e}") from e
+
     llm_model = setup_model(llm, api_key, base_url)
 
     prompt_struct = convert_pydantic_to_custom_json_schema(GeneratedPrompt)[
@@ -194,7 +198,11 @@ def rephrase_questions(
     if not ground_truth:
         return []
 
-    validate_environment(llm_models=[llm], api_key=api_key, base_url=base_url)
+    try:
+        validate_environment(llm_models=[llm], api_key=api_key, base_url=base_url)
+    except Exception as e:
+        raise RuntimeError(f"Failed to validate environment: {e}") from e
+        
     llm_model = setup_model(llm, api_key, base_url)
 
     rephrased_gt = []
