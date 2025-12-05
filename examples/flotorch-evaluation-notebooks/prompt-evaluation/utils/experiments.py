@@ -6,8 +6,8 @@ from flotorch_eval.llm_eval import EvaluationItem
 from flotorch.sdk.memory import FlotorchAsyncVectorStore
 from flotorch.sdk.llm import FlotorchLLM
 
-from core.memory import async_search_vectorstore
-from core.messages import create_messages
+from utils.memory import async_search_vectorstore
+from utils.messages import create_messages
 
 
 @dataclass
@@ -70,6 +70,7 @@ class ContextProvider:
                 chunks = [str(ctx)]
         # Fall back to knowledge base only if ground_truth doesn't have context
         elif self.knowledge_base:
+            print(f"Context not found in ground_truth for question: {question}, searching in knowledge base")
             try:
                 chunks = (
                     await async_search_vectorstore(
@@ -242,6 +243,8 @@ class ExperimentRunner:
                 question = qa.get("question", "")
                 expected = qa.get("answer", "")
                 context_chunks = unit.context_chunks.get(question, [])
+                question_type = qa.get("question_type")  # Get question_type if present
+                question_group_id = qa.get("question_group_id")  # Get question_group_id if present
 
                 message_input = {
                     "system_prompt": unit.system_prompt,
@@ -264,21 +267,40 @@ class ExperimentRunner:
                         return_headers=True,
                         assembly_rule=unit.assembly_rule,
                     )
+                    # Include question_type and question_group_id in metadata if present
+                    if isinstance(headers, dict):
+                        metadata = headers.copy()
+                    elif headers:
+                        metadata = dict(headers)
+                    else:
+                        metadata = {}
+                    if question_type is not None:
+                        metadata["question_type"] = question_type
+                    if question_group_id is not None:
+                        metadata["question_group_id"] = question_group_id
+                    
                     item = EvaluationItem(
                         question=question,
                         generated_answer=response.content,
                         expected_answer=expected,
                         context=context_chunks,
-                        metadata=headers,
+                        metadata=metadata,
                     )
 
                 except Exception as e:
+                    # Include question_type and question_group_id in metadata if present
+                    metadata = {"error": str(e)}
+                    if question_type is not None:
+                        metadata["question_type"] = question_type
+                    if question_group_id is not None:
+                        metadata["question_group_id"] = question_group_id
+                    
                     item = EvaluationItem(
                         question=question,
                         generated_answer="",
                         expected_answer=expected,
                         context=context_chunks,
-                        metadata={"error": str(e)},
+                        metadata=metadata,
                     )
 
                 experiments.append(item)

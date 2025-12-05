@@ -3,7 +3,7 @@ from typing import List, Dict
 from pydantic import BaseModel
 from flotorch.sdk.utils.llm_utils import convert_pydantic_to_custom_json_schema
 
-from core.models import validate_environment, setup_model
+from utils.models import validate_environment, setup_model
 
 
 PROMPT_GENERATION_SYSTEM = """You are a senior prompt engineer specializing in optimizing prompts for Retrieval-Augmented Generation (RAG) systems.
@@ -27,6 +27,7 @@ Your job:
 1. Analyze the provided prompts to understand what kind of reasoning and answer structure the task requires.
 2. Identify potential weaknesses or limitations in the existing prompts.
 3. Generate a new prompt pair (system_prompt and user_prompt) that differs from all the existing ones and could yield better RAG metric performance.
+4. The prompts does not require any kinds of tags including the ones for the question. They will be added later. Both the system and user prompt should be text only.
 
 The new pair must:
 - Differ in strategy or tone from all existing prompts (e.g., evidence citation, reasoning depth, conciseness, explicit context handling, uncertainty handling)
@@ -192,9 +193,14 @@ def rephrase_questions(
     llm: str,
     api_key: str,
     base_url: str,
-    preserve_original: bool = False,
 ) -> List[Dict[str, str]]:
-    """Rephrase questions in ground truth data using an LLM to improve their effectiveness."""
+    """Rephrase questions in ground truth data using an LLM to improve their effectiveness.
+    
+    This function keeps all original questions and adds rephrased versions, resulting in
+    a list with 2n items (n original + n rephrased) if there are n original items.
+    Each item is marked with 'question_type' key set to either 'original' or 'rephrased'.
+    Rephrased items maintain the same answer and context (if present) as their originals.
+    """
     if not ground_truth:
         return []
 
@@ -205,14 +211,22 @@ def rephrase_questions(
         
     llm_model = setup_model(llm, api_key, base_url)
 
-    rephrased_gt = []
+    result_gt = []
+    successful_rephrases = 0
 
     for i, item in enumerate(ground_truth, 1):
         original_question = item.get("question", "")
+        # Create a unique group ID to link original and rephrased questions
+        question_group_id = f"group_{i}"
+
+        # Add original item with 'question_type' marker and group ID
+        original_item = item.copy()
+        original_item["question_type"] = "original"
+        original_item["question_group_id"] = question_group_id
+        result_gt.append(original_item)
 
         if not original_question:
-            print(f"Skipping item {i}: missing 'question' field")
-            rephrased_gt.append(item.copy())
+            print(f"Skipping rephrasing for item {i}: missing 'question' field")
             continue
 
         user_prompt = QUESTION_REPHRASING_USER.format(question=original_question)
@@ -234,20 +248,18 @@ def rephrase_questions(
             if rephrased_question.startswith("'") and rephrased_question.endswith("'"):
                 rephrased_question = rephrased_question[1:-1]
 
-            result_item = item.copy()
-            result_item["question"] = rephrased_question
-
-            if preserve_original:
-                result_item["original_question"] = original_question
-
-            rephrased_gt.append(result_item)
+            # Create rephrased item with same answer and context, but new question
+            rephrased_item = item.copy()
+            rephrased_item["question"] = rephrased_question
+            rephrased_item["question_type"] = "rephrased"
+            rephrased_item["question_group_id"] = question_group_id
+            result_gt.append(rephrased_item)
+            successful_rephrases += 1
 
         except Exception as e:
             print(f"[ERROR] Failed to rephrase question {i}: {e}")
-            result_item = item.copy()
-            if preserve_original:
-                result_item["original_question"] = original_question
-            rephrased_gt.append(result_item)
+            # If rephrasing fails, we still have the original item in the result
 
-    print(f"\nSuccessfully rephrased {len(rephrased_gt)} questions")
-    return rephrased_gt
+    print(f"\nSuccessfully rephrased {successful_rephrases} out of {len(ground_truth)} questions")
+    print(f"Total items in result: {len(result_gt)} ({len(ground_truth)} original + {successful_rephrases} rephrased)")
+    return result_gt

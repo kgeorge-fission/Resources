@@ -172,7 +172,7 @@ def validate_environment(
         for model_name in target_llms:
             try:
                 model = setup_model(model_name, api_key, base_url)
-                test_msg = [{"role": "user", "content": "ping"}]
+                test_msg = [{"role": "user", "content": "<TEST>ping</TEST>. Respond only with: READY"}]
                 
                 response = model.invoke(messages=test_msg)
                 

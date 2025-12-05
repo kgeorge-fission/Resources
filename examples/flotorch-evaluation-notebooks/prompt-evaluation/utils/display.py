@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Optional, Any
 from collections import defaultdict
 import textwrap
 from tabulate import tabulate
@@ -53,6 +53,105 @@ def get_weighted_scores(result: List[dict], weights: Dict[str, float]) -> List[d
     return result
 
 
+def get_best_prompt_pair(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Find the best performing prompt pair from evaluation results.
+    
+    Uses weighted_final_score if available, otherwise falls back to average_score.
+    
+    Args:
+        results: List of evaluation result dicts
+    
+    Returns:
+        The best performing result dict
+    
+    Example:
+        >>> results = run_evaluation(evaluation_data)
+        >>> best = get_best_prompt_pair(results)
+        >>> print(best['system_prompt'])
+    """
+    if not results:
+        raise ValueError("No results provided")
+    
+    # Check if weighted score is available
+    weighted_available = any(
+        "weighted_final_score" in r.get("evaluation_metrics", {}) for r in results
+    )
+    
+    # Use weighted score if available, otherwise use average_score
+    key_metric = "weighted_final_score" if weighted_available else "average_score"
+    
+    best_result = max(
+        results,
+        key=lambda x: x.get("evaluation_metrics", {}).get(key_metric, 0)
+    )
+    
+    return best_result
+
+
+def _display_question_type_comparison(
+    evaluation_data: Dict[str, Any], results: List[Dict[str, Any]]
+):
+    """Display comparison between original and rephrased questions.
+    
+    Args:
+        evaluation_data: Evaluation data dict with 'runs' key containing experiments,
+                         or a list of runs
+        results: List of evaluation result dicts
+    """
+    try:
+        # Handle both dict with 'runs' key and direct list
+        if isinstance(evaluation_data, dict):
+            data_runs = evaluation_data.get("runs", [])
+            if not data_runs and isinstance(evaluation_data, list):
+                data_runs = evaluation_data
+        elif isinstance(evaluation_data, list):
+            data_runs = evaluation_data
+        else:
+            return
+        
+        # Extract question_type information from experiments
+        question_type_stats = defaultdict(int)
+        
+        for run in data_runs:
+            experiments = run.get("experiments", [])
+            for item in experiments:
+                # Handle both EvaluationItem objects and dicts
+                if hasattr(item, "metadata"):
+                    metadata = item.metadata
+                elif isinstance(item, dict):
+                    metadata = item.get("metadata", {})
+                else:
+                    continue
+                
+                question_type = metadata.get("question_type") if isinstance(metadata, dict) else None
+                if question_type:
+                    question_type_stats[question_type] += 1
+        
+        # Only display if we found question_type information
+        if question_type_stats:
+            print("\n" + "=" * 80)
+            print("QUESTION TYPE BREAKDOWN")
+            print("=" * 80)
+            
+            total_count = sum(question_type_stats.values())
+            breakdown_table = []
+            for q_type in sorted(question_type_stats.keys()):
+                count = question_type_stats[q_type]
+                percentage = (count / total_count * 100) if total_count > 0 else 0
+                breakdown_table.append([
+                    q_type.capitalize(),
+                    count,
+                    f"{percentage:.1f}%"
+                ])
+            
+            headers = ["Question Type", "Count", "Percentage"]
+            print(tabulate(breakdown_table, headers=headers, tablefmt="fancy_grid"))
+            print("=" * 80)
+    except Exception:
+        # Silently fail if there's an issue extracting question_type info
+        pass
+
+
 def display_prompt_results(
     results,
     sort_by: str = "average_score",
@@ -61,6 +160,7 @@ def display_prompt_results(
     show_summary: bool = True,
     show_comparison: bool = True,
     show_top_n: int = 5,
+    evaluation_data: Optional[Dict[str, Any]] = None,
 ):
     """Display model-prompt evaluations in formatted tables.
 
@@ -72,6 +172,8 @@ def display_prompt_results(
         show_summary: Show experiment summary
         show_comparison: Show context size comparison
         show_top_n: Number of top results to display
+        evaluation_data: Optional evaluation data dict with 'runs' key containing experiments
+                        Used to extract question_type breakdown (original vs rephrased)
     """
     if not results:
         print("No results to display.")
@@ -179,6 +281,10 @@ def display_prompt_results(
         ]
         print(tabulate(comparison_table, headers=headers, tablefmt="fancy_grid"))
         print("=" * 80)
+
+    # Show question_type breakdown if evaluation_data is provided
+    if evaluation_data:
+        _display_question_type_comparison(evaluation_data, results)
 
     if show_top_n > 0:
         print("\n" + "=" * 80)
@@ -304,9 +410,9 @@ def display_prompt_results(
     print("=" * 80)
     print(tabulate(table, headers=headers, tablefmt="fancy_grid"))
 
-    best_key = "weighted_final_score" if weighted_available else "average_score"
-    best_item = max(results, key=lambda x: x["evaluation_metrics"].get(best_key, 0))
+    best_item = get_best_prompt_pair(results)
     m = best_item["evaluation_metrics"]
+    best_key = "weighted_final_score" if weighted_available else "average_score"
 
     print(
         f"\n{'=' * 80}\n"
@@ -335,9 +441,7 @@ def best_prompt_pair(results):
     Args:
         results: List of evaluation result dicts
     """
-    best_prompt_set = max(
-        results, key=lambda x: x["evaluation_metrics"]["average_score"]
-    )
+    best_prompt_set = get_best_prompt_pair(results)
     m = best_prompt_set["evaluation_metrics"]
 
     print("\n Best Performing Model-Prompt Combination:")
